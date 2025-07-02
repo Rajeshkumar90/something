@@ -1,0 +1,27 @@
+# === Configuration ===
+$octopusUrl = "https://your-octopus-url.com"
+$apiKey = "API-YOURKEY123456789"
+$headers = @{
+    "X-Octopus-ApiKey" = $apiKey
+}
+
+# === Get all users ===
+$usersUrl = "$octopusUrl/api/users?take=1000"
+$users = Invoke-RestMethod -Uri $usersUrl -Headers $headers
+
+# === Loop through each user and get audit logs ===
+foreach ($user in $users.Items) {
+    $username = $user.Username
+    $userId = $user.Id
+
+    $auditUrl = "$octopusUrl/api/audit?users=$userId&take=10&eventCategories=Authentication"
+    $auditEvents = Invoke-RestMethod -Uri $auditUrl -Headers $headers
+
+    $lastLoginEvent = $auditEvents.Items | Where-Object { $_.EventType -eq "UserAuthenticated" } | Select-Object -First 1
+
+    if ($lastLoginEvent) {
+        Write-Output "$username last logged in at: $($lastLoginEvent.Occurred)"
+    } else {
+        Write-Output "$username has never logged in."
+    }
+}
