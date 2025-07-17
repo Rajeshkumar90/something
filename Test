@@ -1,0 +1,102 @@
+# ==============================
+# Required Inputs
+# ==============================
+$org = "YOUR_ORG"                      # Azure DevOps organization name
+$project = "YOUR_PROJECT"             # Azure DevOps project name
+$subscriptionId = "YOUR_SUBSCRIPTION_ID"
+$subscriptionName = "Azure Subscription Name"
+$resourceGroup = "YOUR_RESOURCE_GROUP"
+$serviceConnectionName = "ado-oidc-connection"
+$role = "Contributor"
+$tenantId = (az account show --query tenantId -o tsv)
+
+# ==============================
+# Azure Login
+# ==============================
+az account show > $null
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "🔐 Please run 'az login' first." -ForegroundColor Red
+    exit 1
+}
+$accessToken = az account get-access-token --resource=https://management.azure.com/ --query accessToken -o tsv
+
+# ==============================
+# 1. Create App Registration
+# ==============================
+$appName = "sp-$serviceConnectionName"
+$app = az rest --method POST `
+  --uri "https://graph.microsoft.com/v1.0/applications" `
+  --headers @{ Authorization = "Bearer $accessToken"; "Content-Type" = "application/json" } `
+  --body (@{
+      displayName = $appName
+  } | ConvertTo-Json)
+
+$appObj = $app | ConvertFrom-Json
+$clientId = $appObj.appId
+$appObjectId = $appObj.id
+
+# ==============================
+# 2. Add Federated Credential
+# ==============================
+$issuer = "https://vstoken.dev.azure.com/$org"
+$subject = "sc://$org/$project/$serviceConnectionName"
+$federatedPayload = @{
+    name = "federated-ado"
+    issuer = $issuer
+    subject = $subject
+    description = "OIDC for Azure DevOps"
+    audiences = @("api://AzureADTokenExchange")
+} | ConvertTo-Json -Depth 3
+
+az rest --method POST `
+  --uri "https://graph.microsoft.com/beta/applications/$appObjectId/federatedIdentityCredentials" `
+  --headers @{ Authorization = "Bearer $accessToken"; "Content-Type" = "application/json" } `
+  --body $federatedPayload
+
+# ==============================
+# 3. Assign Role to SP
+# ==============================
+az role assignment create `
+  --assignee $clientId `
+  --role $role `
+  --scope "/subscriptions/$subscriptionId/resourceGroups/$resourceGroup" > $null
+
+# ==============================
+# 4. Create Azure DevOps Service Connection (REST)
+# ==============================
+# Get Azure DevOps PAT token encoded as base64
+$adoPat = "<YOUR_AZURE_DEVOPS_PAT>"  # <-- Replace with a real PAT (must have at least Endpoint admin rights)
+$basicAuth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$adoPat"))
+
+# Prepare JSON body
+$serviceConnection = @{
+    authorization = @{
+        parameters = @{
+            authenticationType = "WorkloadIdentityFederation"
+            serviceprincipalid = $clientId
+            servicePrincipalTenantId = $tenantId
+            oidcSubject = $subject
+        }
+        scheme = "WorkloadIdentityFederation"
+    }
+    data = @{
+        subscriptionId = $subscriptionId
+        subscriptionName = $subscriptionName
+        environment = "AzureCloud"
+        scopeLevel = "Subscription"
+    }
+    name = $serviceConnectionName
+    type = "azurerm"
+    isShared = $true
+    isReady = $true
+} | ConvertTo-Json -Depth 10
+
+# Call Azure DevOps REST API to create the connection
+$uri = "https://dev.azure.com/$org/$project/_apis/serviceendpoint/endpoints?api-version=7.1-preview.4"
+
+$response = Invoke-RestMethod -Method Post -Uri $uri -Headers @{
+    Authorization = "Basic $basicAuth"
+    "Content-Type" = "application/json"
+} -Body $serviceConnection
+
+Write-Host "✅ Service connection '$serviceConnectionName' created successfully in project '$project'." -ForegroundColor Green
