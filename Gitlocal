@@ -1,0 +1,47 @@
+# --- Variables ---
+$sourceOrg = "OrgA"
+$sourceProject = "SourceProject"
+$sourceRepo = "SourceRepo"
+$sourcePAT = "your_source_pat"
+
+$targetOrg = "OrgB"
+$targetProject = "TargetProject"
+$targetRepo = "TargetRepo"
+$targetPAT = "your_target_pat"
+
+$localPath = "C:\Temp\RepoMigration"
+
+# --- Create new repo in target Org using REST API ---
+$createRepoUrl = "https://dev.azure.com/$targetOrg/$targetProject/_apis/git/repositories?api-version=7.0"
+$body = @{
+    name = $targetRepo
+} | ConvertTo-Json -Depth 2
+
+$headers = @{
+    Authorization = "Basic " + [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(":$targetPAT"))
+    "Content-Type" = "application/json"
+}
+
+$response = Invoke-RestMethod -Uri $createRepoUrl -Method Post -Body $body -Headers $headers
+$targetRepoCloneUrl = $response.remoteUrl
+
+Write-Host "✔ Target repo created at $targetRepoCloneUrl"
+
+# --- Clone source repo shallowly (no history) ---
+if (Test-Path $localPath) { Remove-Item $localPath -Recurse -Force }
+git clone --depth 1 https://$sourcePAT@dev.azure.com/$sourceOrg/$sourceProject/_git/$sourceRepo $localPath
+
+Set-Location $localPath
+
+# --- Remove old Git history (optional: clean slate) ---
+Remove-Item -Recurse -Force ".git"
+git init
+git add .
+git commit -m "Initial commit - migrated without history"
+
+# --- Add new remote and push to target ---
+git remote add origin https://$targetPAT@dev.azure.com/$targetOrg/$targetProject/_git/$targetRepo
+git branch -M main
+git push -u origin main --force
+
+Write-Host "✅ Migration complete - pushed without history"
